@@ -1,0 +1,18 @@
+diff --git a/source/kernel/ksocket.cpp b/source/kernel/ksocket.cpp
+index bb7cc51..6fddd68 100644
+--- a/source/kernel/ksocket.cpp
++++ b/source/kernel/ksocket.cpp
+@@ -61,6 +61,13 @@ U32 ksocket(U32 domain, U32 type, U32 protocol) {
+         KFileDescriptorPtr result = KThread::currentThread()->process->allocFileDescriptor(kSocket, K_O_RDWR, 0, -1, 0);
+         return result->handle;
+     } else if (domain == K_AF_INET) {
++#ifdef __EMSCRIPTEN__
++        // The browser has no real internet sockets: emscripten emulates them over
++        // WebSockets and runs select/poll on the page's main thread. A game thread
++        // polling one while holding the process lock froze the page, so the web
++        // build reports no network and games take their offline path.
++        return -K_EAFNOSUPPORT;
++#endif
+         std::shared_ptr<KNativeSocketObject> s = std::make_shared<KNativeSocketObject>(domain, type, protocol);
+         if (s->error) {
+             return s->error;

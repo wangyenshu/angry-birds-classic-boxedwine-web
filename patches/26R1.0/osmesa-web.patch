@@ -1,0 +1,91 @@
+diff --git a/project/emscripten/makefile b/project/emscripten/makefile
+index a38b378..71395a4 100644
+--- a/project/emscripten/makefile
++++ b/project/emscripten/makefile
+@@ -56,6 +56,7 @@ SOURCES += $(wildcard $(PROJDIR)/source/kernel/*.cpp)
+ SOURCES += $(wildcard $(PROJDIR)/source/kernel/**/*.cpp)
+ SOURCES += $(wildcard $(PROJDIR)/source/util/*.cpp)
+ SOURCES += $(wildcard $(PROJDIR)/source/opengl/sdl/*.cpp)
++SOURCES += $(wildcard $(PROJDIR)/source/opengl/osmesa/*.cpp)
+ SOURCES += $(wildcard $(PROJDIR)/source/opengl/*.cpp)
+ SOURCES += $(wildcard $(PROJDIR)/source/vulkan/*.cpp)
+ SOURCES += $(wildcard $(PROJDIR)/source/x11/*.cpp)
+diff --git a/source/opengl/osmesa/osmesa.cpp b/source/opengl/osmesa/osmesa.cpp
+index e9317a2..5ef795e 100644
+--- a/source/opengl/osmesa/osmesa.cpp
++++ b/source/opengl/osmesa/osmesa.cpp
+@@ -32,6 +32,10 @@
+ #define LIBRARY_NAME "osmesa.dll"
+ #elif defined (__APPLE__)
+ #define LIBRARY_NAME "libOSMesa.8.dylib"
++#elif defined (__EMSCRIPTEN__)
++// Web build: Mesa's OSMesa (software rasterizer) is compiled to wasm and linked in statically.
++#define BOXEDWINE_OSMESA_STATIC
++#define LIBRARY_NAME "libOSMesa.a"
+ #else
+ #define LIBRARY_NAME Name needs to be set for this platform
+ #endif
+@@ -212,6 +216,11 @@ void KOpenGLMesa::glSwapBuffers(KThread* thread, const std::shared_ptr<XDrawable
+             }
+             d->unlockData();
+             d->setDirty();
++#ifdef __EMSCRIPTEN__
++            // The web main loop never redraws the X server on its own (XFlush does), so present
++            // the new frame now, otherwise the OSMesa output only shows when Wine happens to XFlush.
++            XServer::getServer()->draw(true);
++#endif
+         }
+     }    
+     lastUpdateTime = KSystem::getMilliesSinceStart();
+@@ -345,6 +354,9 @@ static bool found = false;
+ static bool isAvailableInitialized = false;
+ 
+ bool OsMesaGL::isAvailable() {
++#ifdef BOXEDWINE_OSMESA_STATIC
++    return true;
++#endif
+     if (!isAvailableInitialized) {
+         isAvailableInitialized = true;
+         BString libPath = KSystem::exePath + LIBRARY_NAME;
+@@ -394,6 +406,13 @@ static void* pDLL;
+ #define GL_EXT_FUNCTION(func, RET, PARAMS) ext_gl##func = (gl##func##_func)pOSMesaGetProcAddress("gl" #func);
+ 
+ static void initMesaOpenGL() {    
++#ifdef BOXEDWINE_OSMESA_STATIC
++    pOSMesaGetProcAddress = OSMesaGetProcAddress;
++    pOSMesaMakeCurrent = OSMesaMakeCurrent;
++    pOSMesaCreateContextAttribs = OSMesaCreateContextAttribs;
++    pOSMesaDestroyContext = OSMesaDestroyContext;
++    pOSMesaPixelStore = OSMesaPixelStore;
++#else
+     if (!pDLL) {
+         BString libPath = KSystem::exePath + LIBRARY_NAME;
+         pDLL = SDL_LoadObject(LIBRARY_NAME);
+@@ -410,6 +429,7 @@ static void initMesaOpenGL() {
+     pOSMesaCreateContextAttribs = (fn_OSMesaCreateContextAttribs)SDL_LoadFunction(pDLL, "OSMesaCreateContextAttribs");
+     pOSMesaDestroyContext = (fn_OSMesaDestroyContext)SDL_LoadFunction(pDLL, "OSMesaDestroyContext");
+     pOSMesaPixelStore = (fn_OSMesaPixelStore)SDL_LoadFunction(pDLL, "OSMesaPixelStore");
++#endif
+ 
+     pglFinish = pOSMesaGetProcAddress("glFinish");
+     pglFlush = pOSMesaGetProcAddress("glFlush");
+diff --git a/source/x11/xserver.cpp b/source/x11/xserver.cpp
+index 86d7c38..1705c1b 100644
+--- a/source/x11/xserver.cpp
++++ b/source/x11/xserver.cpp
+@@ -1170,6 +1170,7 @@ void XServer::initVisuals() {
+         });
+     }
+ #else
++	{ // braces: with BOXEDWINE_OPENGL_OSMESA this block is the "else" branch above
+ 	U32 count = KSystem::getPixelFormatCount();
+ 	for (U32 i = 1; i < count; i++) {
+ 		PixelFormat* pf = KSystem::getPixelFormat(i);
+@@ -1193,6 +1194,7 @@ void XServer::initVisuals() {
+ 			addVisual(rMask, gMask, bMask, depth, depth, i);
+ 		}
+ 	}
++	}
+ #endif
+ }
+ 

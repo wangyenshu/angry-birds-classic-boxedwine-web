@@ -1,0 +1,36 @@
+diff --git a/project/emscripten/makefile b/project/emscripten/makefile
+--- a/project/emscripten/makefile
++++ b/project/emscripten/makefile
+@@ -107,6 +107,17 @@
+ 
+ LDFLAGS = -s FORCE_FILESYSTEM -lidbfs.js -s USE_SDL=2 -s USE_ZLIB=1 -fwasm-exceptions -s TOTAL_MEMORY=536870912 --shell-file $(SHELL_FILE) -s EXPORTED_RUNTIME_METHODS='["addRunDependency", "removeRunDependency","ERRNO_CODES"]' $(EXTRA_LD_FLAGS)
+ 
++# WASM_EH=1: compile with wasm exceptions. Boxedwine delivers guest page faults by throwing,
++# and without exception support emscripten compiles every catch block away. The startup files
++# stay without it: emscripten_set_main_loop() leaves main() by unwinding the stack, and with
++# exceptions enabled that unwind would run the destructors of startup locals (StartUpArgs, the
++# open zip file systems) while the emulator keeps using them.
++ifeq ($(WASM_EH),1)
++EH_FLAGS = -fwasm-exceptions
++endif
++NO_EH_SOURCES := $(PROJDIR)/source/sdl/main.cpp $(PROJDIR)/source/sdl/startupArgs.cpp $(PROJDIR)/source/sdl/emscripten/mainloop.cpp
++$(NO_EH_SOURCES:%=$(BUILD_DIR)/%.o): EH_FLAGS =
++
+ #$(TEST_BUILD_DIR)/boxedwineTest: $(TEST_OBJS)
+ #	$(CC) $(TEST_OBJS) -o $@ $(LDFLAGS)
+ 
+@@ -121,12 +132,12 @@
+ # c source
+ $(BUILD_DIR)/%.c.o: %.c
+ 	@$(MKDIR_P) $(dir $@)
+-	@$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
++	@$(CC) $(CPPFLAGS) $(CFLAGS) $(EH_FLAGS) -c $< -o $@
+ 
+ # c++ source
+ $(BUILD_DIR)/%.cpp.o: %.cpp
+ 	@$(MKDIR_P) $(dir $@)
+-	@$(CXX) $(CPPFLAGS) $(CXXFLAGS) -MMD -MP -c $< -o $@
++	@$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(EH_FLAGS) -MMD -MP -c $< -o $@
+ 
+ .PHONY: clean
+ 

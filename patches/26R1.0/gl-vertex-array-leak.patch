@@ -1,0 +1,197 @@
+diff --git a/include/kthread.h b/include/kthread.h
+index b813841..1d2e723 100644
+--- a/include/kthread.h
++++ b/include/kthread.h
+@@ -38,6 +38,7 @@ public:
+     U32 refreshEachCall = 0;
+     bool normalized = false;
+     bool isArrayBuffer = false;
++    std::vector<U8> scratch; // copy of the vertices when they aren't contiguous in host memory
+ };
+ typedef std::shared_ptr<OpenGLVetexPointer> OpenGLVetexPointerPtr;
+ 
+diff --git a/source/opengl/glMarshal.h b/source/opengl/glMarshal.h
+index b597d76..22f21a4 100644
+--- a/source/opengl/glMarshal.h
++++ b/source/opengl/glMarshal.h
+@@ -243,6 +243,7 @@ const GLvoid* marshalPixels(CPU* cpu, U32 dimensions, GLsizei width, GLsizei hei
+ 
+ void updateVertexPointers(CPU* cpu, U32 count);
+ GLvoid* marshalVetextPointer(CPU* cpu, GLuint index, GLboolean normalized, GLint size, GLenum type, GLsizei stride, U32 ptr);
++GLvoid* marshalVertexAttribPointer(CPU* cpu, GLuint index, GLboolean normalized, GLint size, GLenum type, GLsizei stride, U32 ptr);
+ GLvoid* marshalNormalPointer(CPU* cpu, GLenum type, GLsizei stride, U32 ptr);
+ GLvoid* marshalColorPointer(CPU* cpu, GLint size, GLenum type, GLsizei stride, U32 ptr);
+ GLvoid* marshalIndexPointer(CPU* cpu,  GLenum type, GLsizei stride, U32 ptr);
+diff --git a/source/opengl/glMarshalVertex.cpp b/source/opengl/glMarshalVertex.cpp
+index 3dde765..7c07521 100644
+--- a/source/opengl/glMarshalVertex.cpp
++++ b/source/opengl/glMarshalVertex.cpp
+@@ -23,6 +23,24 @@
+ #include "glcommon.h"
+ #include "glMarshal.h"
+ 
++// Host pointer to [address, address + len) if those guest pages sit next to each other in
++// host memory, otherwise nullptr.
++static U8* contiguousRam(KMemory* memory, U32 address, U32 len) {
++    U32 page = address >> K_PAGE_SHIFT;
++    U32 offset = address & K_PAGE_MASK;
++    U8* ram = memory->getRamPtr(page << K_PAGE_SHIFT, K_PAGE_SIZE, false);
++    if (!ram) {
++        return nullptr;
++    }
++    U32 pages = (offset + len + K_PAGE_SIZE - 1) >> K_PAGE_SHIFT;
++    for (U32 i = 1; i < pages; i++) {
++        if (memory->getRamPtr((page + i) << K_PAGE_SHIFT, K_PAGE_SIZE, false) != ram + i * K_PAGE_SIZE) {
++            return nullptr;
++        }
++    }
++    return ram + offset;
++}
++
+ U32 updateVertexPointer(CPU* cpu, OpenGLVetexPointer* p, U32 count) {
+     if (p->isArrayBuffer) {
+         klog("updateVertexPointer might have failed");
+@@ -30,19 +48,34 @@ U32 updateVertexPointer(CPU* cpu, OpenGLVetexPointer* p, U32 count) {
+     }
+ 
+     if (p->ptr) {        
+-        U32 datasize = count * p->size * (p->stride?p->stride:getDataSize(p->type));
+-        U32 available = K_PAGE_SIZE - (p->ptr & K_PAGE_MASK);
+-
+-        if (p->marshal_size < datasize || p->lastMarshalledPtr != p->ptr) {
+-            U32 pageCount = 1 + ((datasize - available + K_PAGE_SIZE - 1) >> K_PAGE_SHIFT);
+-            p->marshal_size = cpu->memory->ensureContinuousNative_unsafe(p->ptr >> K_PAGE_SHIFT, pageCount);
+-            U8* ramPtr = cpu->memory->getRamPtr(p->ptr, 1, false);
+-            if (ramPtr != p->marshal) {
+-                p->marshal = ramPtr;
+-                p->lastMarshalledPtr = p->ptr;
+-                return 1; // hope for the best, could be illegal if between glBegin/glEnd
++        U32 elementSize = p->size * getDataSize(p->type);
++        U32 datasize = count ? (count - 1) * (p->stride ? p->stride : elementSize) + elementSize : 0;
++        U8* marshal = contiguousRam(cpu->memory, p->ptr, datasize);
++        if (!marshal) {
++            // The vertices span guest pages that aren't next to each other in host memory: copy
++            // them into a buffer that is reused for every draw. (This used to remap the guest pages
++            // to newly allocated host memory on each call, memory that was never released, so
++            // games drawing from client arrays ran the web build out of memory.)
++            U32 readable = 0;
++            while (readable < datasize) {
++                U32 address = p->ptr + readable;
++                if (!cpu->memory->canRead(address >> K_PAGE_SHIFT)) {
++                    break;
++                }
++                readable += std::min(K_PAGE_SIZE - (address & K_PAGE_MASK), datasize - readable);
++            }
++            if (p->scratch.size() < datasize) {
++                p->scratch.resize(datasize);
+             }
+-        }        
++            cpu->memory->memcpy(p->scratch.data(), p->ptr, readable);
++            marshal = p->scratch.data();
++        }
++        p->marshal_size = datasize;
++        p->lastMarshalledPtr = p->ptr;
++        if (marshal != p->marshal) {
++            p->marshal = marshal;
++            return 1; // hope for the best, could be illegal if between glBegin/glEnd
++        }
+     } else {
+         p->marshal_size = 0;
+         p->marshal = nullptr;
+@@ -155,6 +188,34 @@ GLvoid* marshalVetextPointer(CPU* cpu, GLuint index, GLboolean normalized, GLint
+     }
+ }
+ 
++// glVertexAttribPointer: every attribute index, 0 included, has its own entry. (Index 0 used to
++// share the glVertexPointer entry, so refreshing it before a draw re-pointed the fixed-function
++// vertex array instead of attribute 0, and shaders read positions from a stale pointer.)
++GLvoid* marshalVertexAttribPointer(CPU* cpu, GLuint index, GLboolean normalized, GLint size, GLenum type, GLsizei stride, U32 ptr) {
++    OpenGLVetexPointerPtr found = cpu->thread->glVertextPointersByIndex.get(index);
++    if (ARRAY_BUFFER()) {
++        if (found) {
++            found->isArrayBuffer = true;
++            found->refreshEachCall = 0;
++        }
++        return (GLvoid*)(uintptr_t)ptr;
++    }
++    if (!found) {
++        found = std::make_shared<OpenGLVetexPointer>();
++        cpu->thread->glVertextPointersByIndex.set(index, found);
++    }
++    OpenGLVetexPointer* p = found.get();
++    p->isArrayBuffer = false;
++    p->size = size;
++    p->type = type;
++    p->stride = stride;
++    p->ptr = ptr;
++    p->refreshEachCall = 1;
++    p->normalized = normalized != GL_FALSE;
++    updateVertexPointer(cpu, p, 0);
++    return ptr ? p->marshal : 0;
++}
++
+ GLvoid* marshalNormalPointer(CPU* cpu, GLenum type, GLsizei stride, U32 ptr) {
+     cpu->thread->glNormalPointer.isArrayBuffer = ARRAY_BUFFER();
+     if (cpu->thread->glNormalPointer.isArrayBuffer) {
+diff --git a/source/opengl/glcommon.cpp b/source/opengl/glcommon.cpp
+index 29cbb89..1f64579 100644
+--- a/source/opengl/glcommon.cpp
++++ b/source/opengl/glcommon.cpp
+@@ -230,6 +230,23 @@ U32 getLargestIndexInType(GLenum type, GLsizei count, const GLvoid* p) {
+     }
+ }
+ 
++// Largest index of an indexed draw whose indices are in the bound GL_ELEMENT_ARRAY_BUFFER.
++U32 getLargestIndexInElementBuffer(GLenum type, GLsizei count, U32 offset) {
++    if (count <= 0) {
++        return 0;
++    }
++#ifndef DISABLE_GL_EXTENSIONS
++    if (ext_glGetBufferSubData) {
++        U32 typeSize = (type == GL_UNSIGNED_BYTE) ? 1 : ((type == GL_UNSIGNED_SHORT) ? 2 : 4);
++        static thread_local std::vector<U8> indexes;
++        indexes.resize((size_t)count * typeSize);
++        GL_FUNC(ext_glGetBufferSubData)(GL_ELEMENT_ARRAY_BUFFER, (GLintptr)offset, (GLsizeiptr)count * typeSize, indexes.data());
++        return getLargestIndexInType(type, count, indexes.data());
++    }
++#endif
++    return count - 1;
++}
++
+ void glcommon_glDrawElements(CPU* cpu) {
+     GLenum mode = ARG1;
+     GLsizei count = ARG2;
+@@ -239,8 +256,9 @@ void glcommon_glDrawElements(CPU* cpu) {
+ 
+     if (ELEMENT_ARRAY_BUFFER()) {
+         p = (const GLvoid*)pARG4;
+-        // :TODO: is this correct to use this count?
+-        updateVertexPointers(cpu, count);
++        // The indices are in a GL buffer: the vertices used run up to the largest index, not
++        // up to count (a draw of 6 indices can use vertices 400-403), so read the indices back.
++        updateVertexPointers(cpu, getLargestIndexInElementBuffer(type, count, indices) + 1);
+         GL_LOG("glDrawElements mode=%x count=%d type=%x", mode, count, type);
+     } else {
+         p = marshalType(cpu, type, count, indices);
+diff --git a/source/opengl/glfunctions_ext3.cpp b/source/opengl/glfunctions_ext3.cpp
+index 8259811..cbb1696 100644
+--- a/source/opengl/glfunctions_ext3.cpp
++++ b/source/opengl/glfunctions_ext3.cpp
+@@ -4969,7 +4969,7 @@ void glcommon_glVertexAttribPointer(CPU* cpu) {
+     if (!ext_glVertexAttribPointer)
+         kpanic("ext_glVertexAttribPointer is NULL");
+     {
+-        GL_FUNC(ext_glVertexAttribPointer)(ARG1, ARG2, ARG3, bARG4, ARG5, marshalVetextPointer(cpu, ARG1, bARG4, ARG2, ARG3, ARG5, ARG6));
++        GL_FUNC(ext_glVertexAttribPointer)(ARG1, ARG2, ARG3, bARG4, ARG5, marshalVertexAttribPointer(cpu, ARG1, bARG4, ARG2, ARG3, ARG5, ARG6));
+     GL_LOG ("glVertexAttribPointer GLuint index=%d, GLint size=%d, GLenum type=%d, GLboolean normalized=%d, GLsizei stride=%d, const void* pointer=%.08x",ARG1,ARG2,ARG3,bARG4,ARG5,ARG6);
+     }
+ }
+@@ -4977,7 +4977,7 @@ void glcommon_glVertexAttribPointerARB(CPU* cpu) {
+     if (!ext_glVertexAttribPointerARB)
+         kpanic("ext_glVertexAttribPointerARB is NULL");
+     {
+-    GL_FUNC(ext_glVertexAttribPointerARB)(ARG1, ARG2, ARG3, bARG4, ARG5, marshalVetextPointer(cpu, ARG1, bARG4, ARG2, ARG3, ARG5, ARG6));
++    GL_FUNC(ext_glVertexAttribPointerARB)(ARG1, ARG2, ARG3, bARG4, ARG5, marshalVertexAttribPointer(cpu, ARG1, bARG4, ARG2, ARG3, ARG5, ARG6));
+     GL_LOG ("glVertexAttribPointerARB GLuint index=%d, GLint size=%d, GLenum type=%d, GLboolean normalized=%d, GLsizei stride=%d, const void* pointer=%.08x",ARG1,ARG2,ARG3,bARG4,ARG5,ARG6);
+     }
+ }

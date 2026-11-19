@@ -1,0 +1,69 @@
+--- a/src/util/detect_os.h
++++ b/src/util/detect_os.h
+@@ -20,6 +20,11 @@
+ #define DETECT_OS_UNIX 1
+ #endif
+ 
++/* Emscripten (WebAssembly) provides a POSIX libc (musl) */
++#if defined(__EMSCRIPTEN__)
++#define DETECT_OS_UNIX 1
++#endif
++
+ /*
+  * Android defines __linux__, so DETECT_OS_LINUX and DETECT_OS_UNIX will
+  * also be defined.
+--- a/src/util/os_misc.c
++++ b/src/util/os_misc.c
+@@ -56,7 +56,7 @@
+ #  define LOG_TAG "MESA"
+ #  include <unistd.h>
+ #  include <log/log.h>
+-#elif DETECT_OS_LINUX || DETECT_OS_CYGWIN || DETECT_OS_SOLARIS || DETECT_OS_HURD
++#elif DETECT_OS_LINUX || DETECT_OS_CYGWIN || DETECT_OS_SOLARIS || DETECT_OS_HURD || defined(__EMSCRIPTEN__)
+ #  include <unistd.h>
+ #elif DETECT_OS_OPENBSD || DETECT_OS_FREEBSD
+ #  include <sys/resource.h>
+@@ -139,7 +139,7 @@
+ bool
+ os_get_total_physical_memory(uint64_t *size)
+ {
+-#if DETECT_OS_LINUX || DETECT_OS_CYGWIN || DETECT_OS_SOLARIS || DETECT_OS_HURD
++#if DETECT_OS_LINUX || DETECT_OS_CYGWIN || DETECT_OS_SOLARIS || DETECT_OS_HURD || defined(__EMSCRIPTEN__)
+    const long phys_pages = sysconf(_SC_PHYS_PAGES);
+    const long page_size = sysconf(_SC_PAGE_SIZE);
+ 
+--- a/include/c11/threads_posix.h
++++ b/include/c11/threads_posix.h
+@@ -180,7 +180,7 @@
+  * Thus the linker will be happy and things don't clash when building
+  * with -O1 or greater.
+  */
+-#if defined(HAVE_FUNC_ATTRIBUTE_WEAK) && !defined(__CYGWIN__)
++#if defined(HAVE_FUNC_ATTRIBUTE_WEAK) && !defined(__CYGWIN__) && !defined(__EMSCRIPTEN__) /* wasm-ld does not pull weak refs from libc */
+ __attribute__((weak))
+ int pthread_mutexattr_init(pthread_mutexattr_t *attr);
+ 
+--- a/src/mesa/drivers/osmesa/meson.build
++++ b/src/mesa/drivers/osmesa/meson.build
+@@ -24,20 +24,16 @@
+   osmesa_link_with += libglapi
+ endif
+ 
+-libosmesa = shared_library(
++libosmesa = static_library(
+   osmesa_lib_name,
+   ['osmesa.c', glapitable_h, glapitemp_h],
+   gnu_symbol_visibility : 'hidden',
+-  link_args : ld_args_gc_sections,
+   include_directories : [
+     inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux,
+   ],
+   link_whole : libglapi_static,
+   link_with : [libmesa_classic, osmesa_link_with],
+   dependencies : [dep_thread, dep_selinux],
+-  name_prefix : host_machine.system() == 'windows' ? '' : 'lib',  # otherwise mingw will create libosmesa.dll
+-  soversion : host_machine.system() == 'windows' ? '' : '8',
+-  version : '8.0.0',
+   install : true,
+ )
+ 

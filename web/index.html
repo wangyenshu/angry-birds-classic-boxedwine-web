@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Angry Birds Classic v3.3.0 in Browser</title>
+<script src="coi-serviceworker.js"></script>
+</head>
+<body>
+<h1>Angry Birds Classic v3.3.0 in Browser</h1>
+<p id="status">Loading...</p>
+<canvas id="canvas" width="1024" height="768" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+<p>The game runs in Wine inside Boxedwine (an x86 emulator compiled to WebAssembly) and every frame is drawn by Mesa's software OpenGL on the CPU, so expect a few frames per second. The first start takes several minutes; don't reload while the screen is black.</p>
+<p>The game comes activated with the key from <a href="https://lsyxnl.itch.io/angry-birds-classic">the itch.io page</a> (<code>THET-ALEV-LEFR-USWO</code>). If you played an earlier, unactivated version of this page in this browser, open it once with <code>?reset=1</code> added to the address to drop that old save.</p>
+<p>Sound starts after your first mouse click on the game. Progress is kept in this browser (IndexedDB). Add <code>?sound=false</code> to the URL to mute.</p>
+<h3>Credit:</h3>
+<ul>
+<li>Angry Birds Classic v3.3.0 by Rovio Entertainment, installer from <a href="https://lsyxnl.itch.io/angry-birds-classic">lsyxnl.itch.io</a></li>
+<li><a href="https://github.com/danoon2/Boxedwine">Boxedwine</a> (<a href="license.txt">license</a>)</li>
+<li><a href="https://www.mesa3d.org/">Mesa</a> (OSMesa software renderer)</li>
+<li><a href="https://github.com/gzuidhof/coi-serviceworker">coi-serviceworker</a></li>
+</ul>
+<script src="shell.js"></script>
+</body>
+</html>
